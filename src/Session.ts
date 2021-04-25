@@ -1,5 +1,4 @@
 import { ky, printImage } from "./deps.ts";
-import { Auth, User } from "./types/index.ts";
 import { sleep } from "./utils/index.ts";
 
 const headers = {
@@ -16,7 +15,9 @@ interface Auth {
   passTicket: string;
   wxsid: string;
   wxuin: string;
-  cookie: string;
+  cookie: {
+    [key: string]: string;
+  };
 }
 
 interface User {
@@ -29,6 +30,9 @@ interface User {
   };
   SyncKey: string;
 }
+
+const encoder = new TextEncoder();
+const decoder = new TextDecoder("utf-8");
 
 class Session {
   auth?: Auth;
@@ -63,6 +67,21 @@ class Session {
     printImage({ path: qrcodeUrl, width: 64 });
   }
 
+  updateCookie(headers: Headers) {
+    headers.forEach((value, key) => {
+      if (key === "set-cookie") {
+        const [cookieKey, cookieValue] = value.match(/^(.*?);/)![1].split("=");
+        this.auth!.cookie![cookieKey] = cookieValue;
+      }
+    });
+  }
+
+  getCookie(): string {
+    return Object.entries(this.auth!.cookie!).map(([key, value]) =>
+      `${key}=${value}`
+    ).join(" ;");
+  }
+
   async checkCode(code: string): Promise<void> {
     var response = await ky.get(
       "https://login.wx.qq.com/cgi-bin/mmwebwx-bin/login",
@@ -93,21 +112,16 @@ class Session {
     });
 
     const authBody = await authResponse.text();
-    const cookies = [] as string[];
-    authResponse.headers.forEach((value, key) => {
-      if (key === "set-cookie") {
-        cookies.push(value.match(/^(.*?);/)![1]);
-      }
-    });
 
     try {
       this.auth = {
-        cookie: cookies.join("; "),
+        cookie: {},
         skey: authBody.match(/<skey>(.*?)<\/skey>/)![1]!,
         passTicket: authBody.match(/<pass_ticket>(.*?)<\/pass_ticket>/)![1],
         wxsid: authBody.match(/<wxsid>(.*?)<\/wxsid>/)![1],
         wxuin: authBody.match(/<wxuin>(.*?)<\/wxuin>/)![1],
       };
+      this.updateCookie(authResponse.headers);
     } catch (_) {
       throw new Error("can not login with wechat web");
     }
@@ -140,10 +154,11 @@ class Session {
       throw new Error("no login yet");
     }
 
-    const { SyncCheckKey } = await ky.post(`cgi-bin/mmwebwx-bin/webwxsync`, {
+    const syncResp = await ky.post(`cgi-bin/mmwebwx-bin/webwxsync`, {
       headers: {
-        cookie: this.auth.cookie,
+        cookie: this.getCookie(),
       },
+      timeout: 30000,
       prefixUrl: this.prefixUrl,
       searchParams: {
         sid: this.auth.wxsid,
@@ -160,15 +175,23 @@ class Session {
         SyncKey: this.user.SyncKey,
         rr: ~new Date(),
       }),
-    }).json();
+    });
+
+    this.updateCookie(syncResp.headers);
+    Deno.writeFileSync(
+      "./auth.json",
+      encoder.encode(JSON.stringify(this.auth)),
+    );
+    const { SyncCheckKey } = await syncResp.json();
 
     const host = this.prefixUrl.replace("//", "//webpush.");
 
     const loop = async (): Promise<void> => {
       var response = await ky.get(`cgi-bin/mmwebwx-bin/synccheck`, {
+        timeout: 30000,
         prefixUrl: host,
         headers: {
-          cookie: this.auth!.cookie,
+          cookie: this.getCookie(),
         },
         searchParams: {
           r: +new Date(),
@@ -188,9 +211,17 @@ class Session {
   }
 
   async login() {
-    const code = await this.getCode();
-    this.displayQrcode(code);
-    await this.checkCode(code);
+    try {
+      // TODO login status check
+      const authText = Deno.readFileSync("./auth.json");
+      this.auth = JSON.parse(decoder.decode(authText)) as Auth;
+      this.prefixUrl = "https://wx.qq.com/";
+    } catch (_) {
+      const code = await this.getCode();
+      this.displayQrcode(code);
+      await this.checkCode(code);
+    }
+
     await this.initUser();
     this.keepalive();
   }
