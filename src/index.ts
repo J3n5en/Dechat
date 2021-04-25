@@ -1,3 +1,3 @@
-import Dechat from "./Dechat.ts";
+import DiaoChat from "./DiaoChat.ts";
 
-const dechat = new Dechat();
+const dc = new DiaoChat();

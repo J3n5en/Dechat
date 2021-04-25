@@ -130,7 +130,6 @@ class Session {
         }),
       },
     ).json();
-    // this.genSyncKey(SyncKey.List);
     this.user = user as User;
 
     console.log(`${this.user?.User.NickName} have been logined`);
